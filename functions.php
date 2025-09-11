@@ -6,6 +6,8 @@ require_once __DIR__ . '/config.php';
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 
+use function PHPSTORM_META\override;
+
 function loadSql($filePath)
 {
     $path = __DIR__ . '/sql/' . $filePath;
@@ -258,6 +260,8 @@ function unionEmployeeCodes(array $csv1ByEmp, array $csv2ByEmp): array
 function pickMinutesAsHourMinuteStr(array $row, array $keys, string $default = '0.0'): string
 {
     foreach ($keys as $k) {
+        if (isset($row[$k]) && $row[$k] == '0')
+            return '0.00';
         if (isset($row[$k]) && $row[$k] !== '') {
             return minutesOrHhmmToHourMinuteStr((string)$row[$k]);
         }
@@ -267,49 +271,53 @@ function pickMinutesAsHourMinuteStr(array $row, array $keys, string $default = '
 
 /**
  * 分(整数) or "HH:MM" を 時間.分 文字列へ
- * @param string $v 入力値（例: 13090, "1:30"）
- * @param int    $decimals 小数点以下桁数
+ * @param string $v 入力値（例: 13090）
  */
 function minutesOrHhmmToHourMinuteStr(string $v): string
 {
     // 前後の空白を削除
     $v = trim($v);
 
-    // 空文字なら 0.0 を返す
-    if ($v === '') return '0.0';
+    // 空文字なら 0.00 を返す
+    if ($v === '') return '0.00';
 
     // 数字のみの場合（例: "2530" 分）
     if (preg_match('/^\d+$/', $v)) {
-        // 時間部分：60分で割った整数部分
-        $hours = intdiv((int)$v, 60);
-        // 分部分：60で割った余り
-        $minutes = (int)$v % 60;
+        $total = (int)$v;
+        $hours = intdiv($total, 60);   // 時間
+        $minutes = $total % 60;        // 分
     }
     // "HH:MM" 形式の場合（例: "1:30"）
     elseif (preg_match('/^\s*(\d{1,3}):([0-5]\d)\s*$/', $v, $m)) {
-        $hours = (int)$m[1];   // HH 部分
-        $minutes = (int)$m[2]; // MM 部分
+        $hours = (int)$m[1];
+        $minutes = (int)$m[2];
     }
-    // 上記以外の形式の場合はそのまま返す
+    // 上記以外の形式はそのまま返す
     else {
-        return $v; // 例外値や文字列のまま返す
+        return $v;
     }
 
-    // HH.MM 形式で返す（例: 42時間10分 → "42.10"）
+    // ゼロは常に "0.00"
+    if ($hours === 0 && $minutes === 0) {
+        return '0.00';
+    }
+
+    // HH.MM 形式（例: 42時間10分 → "42.10"）
     return sprintf('%d.%02d', $hours, $minutes);
 }
 
-
 /**
- * 社員コードごとに template.xls に1行ずつ書き込む（開始行=10）
- * @param array  $csvKintai  勤怠集計CSV（社員コード => 行配列）
- * @param array  $csvKyuka   休暇取得CSV（社員コード => 行配列）
- * @param string $payday     給与支給日（例: 2025-07-31）
- * @param array $employeesWithApplications     人事管理マスタ・設定適用マスタを統合した連想配列
- * @param int $contractWorkMinutes     契約所定時間
- * @param int $flexStandardMinutes     フレックス基準時間
- * @param array $managementPositionCodes 管理職の職位コード配列
- * @return string 生成XLSパス（一時ファイル）
+ * 社員コードごとに template.xls に1行ずつ書き込む
+ *
+ * @param array  $csvKintai  勤怠集計CSV
+ * @param array  $csvKyuka   休暇取得CSV
+ * @param string $payday     給与支給日
+ * @param array  $employeesWithApplications 人事管理マスタ＋設定適用マスタの統合配列
+ * @param int    $contractWorkMinutes       契約所定時間（分）
+ * @param int    $flexStandardMinutes       フレックス基準時間（分）
+ * @param array  $managementPositionCodes   管理職の職位コード配列
+ * @param array  $halfHolidayByEmp          前有・後有を同日に取得した社員のリスト
+ * @return string 生成された XLS ファイルのパス
  */
 function buildXlsToTempByEmployee(
     array $csvKintai,
@@ -317,254 +325,201 @@ function buildXlsToTempByEmployee(
     string $payday,
     array $employeesWithApplications,
     int $contractWorkMinutes,
-    int $flexStandardMinutes,   
-    array $managementPositionCodes
+    int $flexStandardMinutes,
+    array $managementPositionCodes,
+    array $halfHolidayByEmp
 ): string {
     if (!is_file(TEMPLATE_XLS)) {
         throw new RuntimeException('template.xls が見つかりません。');
     }
 
-    $paydayFmt = normalizePayday($payday);
-    $codes = unionEmployeeCodes($csvKintai, $csvKyuka);
-
+    // Excelテンプレートをロード
     $spreadsheet = IOFactory::load(TEMPLATE_XLS);
     $sheet = $spreadsheet->getActiveSheet();
+    $rowIndex = 10; // 書き込み開始行
 
-    $row = 10; // 書き込み開始行
+    // 支給日の日付形式を YYYY/MM/DD 形式に変換
+    $paydayFmt = normalizePayday($payday);
 
-    foreach ($codes as $emp) {
-        $kintai_row = $csvKintai[$emp] ?? [];
-        $kyuka_row = $csvKyuka[$emp]  ?? [];
-        $emp = str_pad((string)$emp, 7, '0', STR_PAD_LEFT);
+    // 勤怠集計CSV、休暇取得CSVの両方に存在する社員コードを抽出
+    $employeeCodes = unionEmployeeCodes($csvKintai, $csvKyuka);
 
-        $vals = [];
+    foreach ($employeeCodes as $employeeCode) {
+        $kintaiRow = $csvKintai[$employeeCode] ?? [];
+        $kyukaRow      = $csvKyuka[$employeeCode] ?? [];
+        $employeeCode  = str_pad((string)$employeeCode, 7, '0', STR_PAD_LEFT); // 社員番号
 
-        // 管理職判定
-        $position_code = $kintai_row['職位コード'];
-        $isManagementPosition = in_array($position_code, $managementPositionCodes, true);
+        $rowValues = [];
 
-        // フレックス勤務判定
-        $contractName = $kintai_row['雇用契約名称'];
-        $isFlexWork = ($contractName === '社員FL');
+        // --- 各種判定フラグ ---
+        $positionCode      = $kintaiRow['職位コード'] ?? null; 
+        $isManagement      = in_array($positionCode, $managementPositionCodes, true); // 管理者
+        $isFlex            = ($kintaiRow['雇用契約名称'] ?? '') === '社員FL'; // フレックス
+        $patternName       = $employeesWithApplications[$employeeCode]['pattern_name'] ?? ''; 
+        $isMonthly         = str_contains($patternName, '月給者'); // 月給者
+        $isHourly          = str_contains($patternName, '時給者'); // 時給者
+        $isChildCareWorker = str_contains($patternName, '育勤'); // 育児勤務者
 
-        // 月給者・時給者・育児勤務者判定
-        $employee = $employeesWithApplications[$emp];
-        $patternName = $employee['pattern_name'] ?? '';
-        $isMonthly = str_contains($patternName, '月給者');
-        $isHourly  = str_contains($patternName, '時給者');
-        $childCareWorker  = str_contains($patternName, '育勤');
+        // 管理職以外の月給者＋時給者＋育児勤務者を割増対象とする
+        // $isVariableWorker  = ((!$isManagement && $isMonthly) || $isHourly || $isChildCareWorker);
 
-        // 変形労働加算対象者判定
-        $isVariableWorker = ((!$isManagementPosition && $isMonthly) || $isHourly || $childCareWorker);
+        $rowValues[] = 'F380';        // 1. お客様番号
+        $rowValues[] = '001';         // 2. 給与会社番号
+        $rowValues[] = 'PAY010';      // 3. 区分
+        $rowValues[] = $paydayFmt;    // 4. 支給年月日
+        $rowValues[] = 'P';           // 5. 処理種別
+        $rowValues[] = '';            // 6. 処理種別分類
+        $rowValues[] = $employeeCode; // 7. 社員番号
 
-        // 1. お客様番号
-        $vals[] = 'F380';
+        // --- 8. 出勤日数 ---
+        $rowValues[] = (int)pickVal($kintaiRow, ['出勤日数'], '0');        
 
-        // 2. 給与会社番号
-        $vals[] = '001';
+        // --- 9 有休（全休）---
+        $rowValues[] = (string)((int)($kyukaRow['有給休暇(全休)'] ?? 0) + (int)($kyukaRow['ストック休暇(全休)'] ?? 0));
 
-        // 3. 区分
-        $vals[] = 'PAY010';
+        // --- 10. 勤務時間 ---
+        if ($isFlex) {
+            // フレックス：休暇日数を基準時間から減算
+            // 7時間55分減算対象の休暇日数を取得
+            $holiday755cnt =
+                (int)$kyukaRow['有給休暇(全休)']
+                + (int)$kyukaRow['前期特別休暇(全休)【18】']
+                + (int)$kyukaRow['後期特別休暇(全休)【19】']
+                + (int)$kyukaRow['結婚休暇(全休)【20】']
+                + (int)$kyukaRow['忌引休暇(全休)【22】']
+                + (int)$kyukaRow['産休（有給）(全休)【23】']
+                + (int)$kyukaRow['出勤停止(全休)【43】']
+                + (int)$kyukaRow['公休(全休)【44】']
+                + (int)$kyukaRow['労災欠勤(全休)【45】']
+                + (int)$kyukaRow['災害休暇(全休)【46】']
+                + (int)$kyukaRow['ストック休暇(全休)'];
 
-        // 4. 支給年月日
-        $vals[] = $paydayFmt;
+            // 前有・後有の回数を取得
+            $halfAm = (int)($kyukaRow['有給休暇(午前)'] ?? 0) + (int)($kyukaRow['ストック休暇(午前)'] ?? 0);
+            $halfPm = (int)($kyukaRow['有給休暇(午後)'] ?? 0) + (int)($kyukaRow['ストック休暇(午後)'] ?? 0);
 
-        // 5. 処理種別
-        $vals[] = 'P';
+            // 前有・後有を同日に取った場合は全休扱いとする
+            if ($halfAm >= 1 && $halfPm >= 1 && !empty($halfHolidayByEmp[$employeeCode])) {
+                
+                $bothHalfHolidayCount = (int)$halfHolidayByEmp[$employeeCode]['both_half_holiday_count']; // 前有・後有を同日に取得した回数
+                $halfAm = $halfAm - $bothHalfHolidayCount; // 同日に取得した回数分「前有」から減算
+                $halfPm = $halfPm - $bothHalfHolidayCount; // 同日に取得した回数分「後有」から減算
+                $holiday755cnt = $holiday755cnt + $bothHalfHolidayCount; // 同日に取得した回数分「7時間55分」減算対象休暇日数に加算
+            }
 
-        // 6. 処理種別分類
-        $vals[] = '';
+            // 3時間55分減算対象の休暇日数を取得
+            $holiday355cnt = $halfAm + $halfPm;
 
-        // 7. 社員番号
-        $vals[] = $emp;
+            // 休暇取得日数を考慮したフレックス基準時間を算出
+            $flexStdAdj    = $flexStandardMinutes - ($holiday755cnt * 475) - ($holiday355cnt * 235);
 
-        // 8. 入・出勤日数
-        $vals[] = pickVal($kintai_row, ['出勤日数'], '0');
-
-        // 9. 入・有休
-        $vals[] = pickVal($kyuka_row, ['有給休暇(全休)'], '0.0');
-
-        // 10. 勤務時間
-        if ($isFlexWork) {
-            // -- フレックス勤務
-            // ---------  ▼ 未実装 -----------
-            // 休暇取得日数の合計値を取得
-            // 基準時間の計算
-            // 勤務時間を算出
-            // 残業時間を算出
-            $vals[]  = minutesOrHhmmToHourMinuteStr('99:99');
-            // ---------  ▲ 未実装 -----------
+            // フレックス勤務者の「勤務時間」「残業時間」「減給時間」を算出
+            $workMinutes   = (int)($kintaiRow['勤務時間'] ?? 0);
+            if ($workMinutes >= $flexStdAdj) {
+                $rowValues[]  = minutesOrHhmmToHourMinuteStr((string)$flexStdAdj); // フレックス勤務時間（[フレックス基準時間]とする）
+                $flexOvertime = $workMinutes - $flexStdAdj;  // フレックス残業時間（[勤務時間] - [フレックス基準時間]とする）
+                $flexPaycut   = '0.00';                      // フレックス減給時間（"0.00"とする）
+            } else {
+                $rowValues[]  = minutesOrHhmmToHourMinuteStr((string)$workMinutes); // フレックス勤務時間（[勤務時間]とする）
+                $flexOvertime = '0.00'; // フレックス残業時間（"0.00"とする）
+                $flexPaycut   = $flexStdAdj - $workMinutes;  // フレックス減給（[フレックス基準時間] - [勤務時間]とする）
+            }
         } else {
-            // -- 非フレックス勤務
-            // 勤怠集計(勤務時間) - 勤怠集計(法定外残業時間(週40時間超除く)) - 勤怠集計(法定内残業時間(週40時間超除く))を計算
-            $work_time = (string)(
-                (int)$kintai_row['勤務時間']
-                - (int)$kintai_row['法定外残業時間(週40時間超除く)']
-                - (int)$kintai_row['法定内残業時間(週40時間超除く)']
-            );
-            $vals[] = minutesOrHhmmToHourMinuteStr($work_time);
+            // フレックス以外：勤務時間 - 法定外 - 法定内
+            $workMinutes = (int)($kintaiRow['勤務時間'] ?? 0)
+                - (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0)
+                - (int)($kintaiRow['法定内残業時間(週40時間超除く)'] ?? 0);
+            $rowValues[] = minutesOrHhmmToHourMinuteStr((string)$workMinutes);
         }
 
-        // 11. 入・普通残業時間
-        if ($isFlexWork) {
-            // -- フレックス勤務
-            // 残業時間を格納する
-            $vals[]  = minutesOrHhmmToHourMinuteStr('99:99');
-        } else if ($isManagementPosition) {
-            // -- 管理職
-            // ゼロを格納する
-            $vals[] = '0.00';
+        // --- 11. 普通残業 ---
+        if ($isFlex) {
+            // フレックス：フレックス基準時間を超過している時間
+            $rowValues[] = minutesOrHhmmToHourMinuteStr($flexOvertime); 
+        } elseif ($isManagement) {
+            // 管理職："0.00" とする
+            $rowValues[] = '0.00'; // 管理職
+        } else{
+            // フレックス・管理職以外："法定外残業時間"に対して割増分を加算する 
+            $overtime = (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0);
+            if ($workMinutes > $contractWorkMinutes) {
+                $overtime += $workMinutes - $contractWorkMinutes;
+            }
+            $rowValues[] = minutesOrHhmmToHourMinuteStr((string)$overtime);
+        }
+
+        // --- 12. 深夜時間 ---
+        $rowValues[] = pickMinutesAsHourMinuteStr($kintaiRow, ['深夜時間'], '0.00');
+
+        // --- 13. 深夜残業 ---
+        if ($isFlex || $isManagement) {
+            // フレックス："0.00" とする
+            $rowValues[] = '0.00';
         } else {
-            // -- 非フレックス勤務・非管理職
-            // ---------  ▼ 未実装 -----------
-            // 残業時間割増処理
-            // if ($isVariableWorker){}
-            $vals[] = pickMinutesAsHourMinuteStr($kintai_row, ['法定外残業時間(週40時間超除く)'], '0.00');
-            // ---------  ▲ 未実装 -----------
+            // フレックス以外：深夜残業時間
+            $rowValues[] = pickMinutesAsHourMinuteStr($kintaiRow, ['深夜時間外時間'], '0.00');
         }
 
-        // 12. 入・深夜時間
-        $vals[] = pickMinutesAsHourMinuteStr($kintai_row, ['深夜時間'], '0.00');
-
-        // 13. 入・深夜残業時間
-        if ($isFlexWork) {
-            // -- フレックス勤務
-            // ゼロを格納する            
-            $vals[] = '0.00';
-        } else if ($isManagementPosition){
-            // -- 管理職
-            // ゼロを格納する            
-            $vals[] = '0.00';
+        // --- 14 法定内残業 ---
+        if ($isFlex) {
+            // フレックス："0.00" とする
+            $rowValues[] = '0.00';
+        } elseif ($isManagement) {
+            // 管理職：法廷内残業時間に法定外残業時間を加算
+            $sum = (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0)
+                 + (int)($kintaiRow['法定内残業時間(週40時間超除く)'] ?? 0);
+            $rowValues[] = minutesOrHhmmToHourMinuteStr((string)$sum);
         } else {
-            // -- 非フレックス勤務・非管理職
-            $vals[] = pickMinutesAsHourMinuteStr($kintai_row, ['深夜時間外時間'], '0.00');
+            // フレックス・管理職以外：法廷内残業時間
+            $rowValues[] = pickMinutesAsHourMinuteStr($kintaiRow, ['法定内残業時間(週40時間超除く)'], '0.00');
         }
 
-        // 14. 入・法定内残業時間
-        if ($isFlexWork) {
-            // -- フレックス勤務
-            // ゼロを格納する
-            $vals[] = '0.00';
-        } else if ($isManagementPosition) {
-            // -- 管理職
-            // 勤怠集計(法定外残業時間(週40時間超除く)) + 勤怠集計(法定内残業時間(週40時間超除く))を格納
-            $vals[] = minutesOrHhmmToHourMinuteStr(
-                (string)(
-                    (int)$kintai_row['法定外残業時間(週40時間超除く)'] +
-                    (int)$kintai_row['法定内残業時間(週40時間超除く)'])
-            );
-        } else {
-            // -- 非フレックス勤務・非管理職
-            $vals[] = pickMinutesAsHourMinuteStr($kintai_row, ['法定内残業時間(週40時間超除く)'], '0.00');
+        // --- 15. 休日出勤 --- 
+        $rowValues[] = '0.00'; 
+
+        // --- 16. 減給時間 ---
+        $rowValues[] = $isFlex ? minutesOrHhmmToHourMinuteStr($flexPaycut) : ($isManagement ? '0.00' : pickMinutesAsHourMinuteStr($kintaiRow, ['減額対象時間'], '-'));
+
+        // --- その他休暇・欠勤など ---
+        $rowValues[] = '0'; // 17. 病欠100
+        $rowValues[] = pickVal($kyukaRow, ['病欠150(全休)【38】'], '-'); // 18. 病欠150
+        $rowValues[] = '0'; // 19. 認欠75
+        $rowValues[] = pickVal($kintaiRow, ['振替休日日数'], '-'); // 20. 振休
+        $rowValues[] = pickVal($kintaiRow, ['交替休日日数'], '-'); // 21. 交休
+        $rowValues[] = pickVal($kyukaRow, ['休日(全休)【28】'], '-');  // 22. 休日
+        $rowValues[] = (string)((int)($kyukaRow['有給休暇(午前)'] ?? 0) + (int)($kyukaRow['ストック休暇(午前)'] ?? 0));  // 23. 前有
+        $rowValues[] = (string)((int)($kyukaRow['有給休暇(午後)'] ?? 0) + (int)($kyukaRow['ストック休暇(午後)'] ?? 0));  // 24. 後有
+        $rowValues[] = pickVal($kyukaRow, ['前期特別休暇(全休)【18】'], '-');  // 25. 前期
+        $rowValues[] = pickVal($kyukaRow, ['後期特別休暇(全休)【19】'], '-');  // 26. 後期
+        $rowValues[] = pickVal($kyukaRow, ['公休(全休)【44】'], '-');  // 27. 公休
+        $rowValues[] = pickVal($kyukaRow, ['前振(全休)【13】'], '-');  // 28. 前振
+        $rowValues[] = pickVal($kyukaRow, ['忌引休暇(全休)【22】'], '-');  // 29. 忌引
+        $rowValues[] = pickVal($kyukaRow, ['結婚休暇(全休)【20】'], '-');  // 30. 結婚
+        $rowValues[] = pickVal($kyukaRow, ['産休（有給）(全休)【23】'], '-');  // 31. 産有
+        $rowValues[] = pickVal($kyukaRow, ['産休（無給）(全休)【25】'], '-');  // 32. 産無
+        $rowValues[] = pickVal($kyukaRow, ['育児休職(全休)【40】'], '-');   // 33. 育職
+        $rowValues[] = pickVal($kyukaRow, ['介護休職(全休)【41】'], '-');   // 34. 介職
+        $rowValues[] = pickVal($kyukaRow, ['無欠無給(全休)【29】'], '-');   // 35. 無欠（無給）
+        $rowValues[] = pickVal($kyukaRow, ['介護・看護休暇（無給）(全休)【27】'], '-'); // 36. 看休（無給）
+        $rowValues[] = pickVal($kyukaRow, ['生理休暇（無給）(全休)【26】'], '-'); // 37. 生休（無給）
+        $rowValues[] = pickVal($kyukaRow, ['労災欠勤(全休)【45】'], '-');  // 38. 労災
+        $rowValues[] = pickVal($kyukaRow, ['災害休暇(全休)【46】'], '-');  // 39. 労災
+        $rowValues[] = '0'; // 40 育勤
+        $rowValues[] = '0'; // 41 介勤
+
+        // --- Excelへ書き込み ---
+        foreach ($rowValues as $colIndex => $value) {
+            $sheet->setCellValueExplicit(xlCol($colIndex + 2) . $rowIndex, $value, DataType::TYPE_STRING);
         }
-
-        // 15. 休日出勤時間
-        $vals[] = '0';
-
-        // 16. 入・減給時間
-        if ($isFlexWork) {
-            // -- フレックス勤務
-            // ---------  ▼ 未実装 -----------
-            // 対象月の基準時間不足分を計算する
-            $vals[] = '99.99';
-            // ---------  ▲ 未実装 -----------
-        } else if ($isManagementPosition) {
-            // -- 管理職
-            // ゼロを格納する
-            $vals[] = '0.00';
-        } else {
-            // -- 非フレックス勤務・非管理職
-            $vals[] = pickMinutesAsHourMinuteStr($kintai_row, ['減額対象時間'], '-');
-        }
-
-        // 17. 入・病欠（１００）
-        $vals[] = '0';
-
-        // 18. 入・病欠（１５０）
-        $vals[] = pickVal($kyuka_row, ['病欠150(全休)【38】'], '-');
-
-        // 19. 入・認欠（７５）
-        $vals[] = '0';
-
-        // 20. 入・振休
-        $vals[] = pickVal($kintai_row, ['振替休日日数'], '-');
-
-        // 21. 入・交休
-        $vals[] = pickVal($kintai_row, ['交替休日日数'], '-');
-
-        // 22. 入・休日
-        $vals[] = pickVal($kyuka_row, ['休日(全休)【28】'], '-');
-
-        // 23. 入・前有
-        $vals[] = pickVal($kyuka_row, ['有給休暇(午前)'], '-');
-
-        // 24. 入・後有
-        $vals[] = pickVal($kyuka_row, ['有給休暇(午後)'], '-');
-
-        // 25. 入・前期
-        $vals[] = pickVal($kyuka_row, ['前期特別休暇(全休)【18】'], '-');
-
-        // 26. 入・後期
-        $vals[] = pickVal($kyuka_row, ['後期特別休暇(全休)【19】'], '-');
-
-        // 27. 入・公休
-        $vals[] = pickVal($kyuka_row, ['公休(全休)【44】'], '-');
-
-        // 28. 入・前振
-        $vals[] = pickVal($kyuka_row, ['前振(全休)【13】'], '-');
-
-        // 29. 入・忌引
-        $vals[] = pickVal($kyuka_row, ['忌引休暇(全休)【22】'], '-');
-
-        // 30. 入・結婚
-        $vals[] = pickVal($kyuka_row, ['結婚休暇(全休)【20】'], '-');
-
-        // 31. 入・産有
-        $vals[] = pickVal($kyuka_row, ['産休（有給）(全休)【23】'], '-');
-
-        // 32. 入・産無
-        $vals[] = pickVal($kyuka_row, ['産休（無給）(全休)【25】'], '-');
-
-        // 33. 入・育職
-        $vals[] = pickVal($kyuka_row, ['育児休職(全休)【40】'], '-');
-
-        // 34. 入・介職
-        $vals[] = pickVal($kyuka_row, ['介護休職(全休)【41】'], '-');
-
-        // 35. 入・無欠（無給）
-        $vals[] = pickVal($kyuka_row, ['無欠無給(全休)【29】'], '-');
-
-        // 36. 入・看休（無給）
-        $vals[] = pickVal($kyuka_row, ['介護・看護休暇（無給）(全休)【27】'], '-');
-
-        // 37. 入・生休（無給）
-        $vals[] = pickVal($kyuka_row, ['生理休暇（無給）(全休)【26】'], '-');
-
-        // 38. 入・労災
-        $vals[] = pickVal($kyuka_row, ['労災欠勤(全休)【45】'], '-');
-
-        // 39. 入・災害
-        $vals[] = pickVal($kyuka_row, ['災害休暇(全休)【46】'], '-');
-
-        // 40. 入・育勤
-        $vals[] = '0';
-
-        // 41. 入・介勤
-        $vals[] = '0';
-
-        // 先頭から順に書き込み
-        for ($i = 1; $i <= count($vals); $i++) {
-            $sheet->setCellValueExplicit(xlCol($i + 1) . $row, $vals[$i - 1], DataType::TYPE_STRING);
-        }
-        $row++;
+        $rowIndex++;
     }
 
-    // 保存
+    // 出力ファイルを一時ディレクトリに保存
     $out = tempnam(sys_get_temp_dir(), 'xls_') . '.xls';
-    $writer = IOFactory::createWriter($spreadsheet, 'Xls');
-    $writer->save($out);
+    IOFactory::createWriter($spreadsheet, 'Xls')->save($out);
     return $out;
 }
+
 
 /**
  * 社員情報テーブルと設定適用テーブルを結合する

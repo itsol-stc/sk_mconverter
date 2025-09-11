@@ -10,6 +10,7 @@ const SQL_APPLICATION       = 'select_application.sql';
 const SQL_CONTRACT_WORKTIME = 'get_contract_worktime.sql';
 const SQL_FLEX_STANDARDS    = 'get_flex_standards.sql';
 const SQL_POSITION          = 'get_position_master.sql';
+const SQL_HALF_HOLIDAY      = 'select_both_half_holiday_count.sql';
 
 // 初期化
 ensureDirs();
@@ -39,7 +40,10 @@ try {
     $year  = (int)substr($targetMonth, 0, 4);
     $month = (int)substr($targetMonth, 4, 2);
 
-    // 月末（人事系参照は Y/m/d 形式で使用）
+    // 月初日付をYYYY/MM/DD形式で取得
+    $firstDayForRef = monthFirstDayYmdSlash($targetMonth);
+
+    // 月末日付をYYYY/MM/DD形式で取得
     $lastDayForRef = monthLastDayYmdSlash($targetMonth);
 
     // CSV読込
@@ -83,8 +87,31 @@ try {
     $positionRow = fetchAllRows($pdo_sai, SQL_POSITION,[]);
     $managementPositionCodes = array_column($positionRow, 'position_code');
 
+    // 指定期間内で「同日に前有・後有を取得している」データを取得
+    $halfHolidayCountRow = fetchAllRows($pdo_mosp, SQL_HALF_HOLIDAY, [
+        ':start_date' => $firstDayForRef,
+        ':end_date'   => $lastDayForRef,
+    ]);
+    // 取得結果を employee_code をキーにした連想配列へ変換
+    $halfHolidayByEmp = [];
+    if (!empty($halfHolidayCountRow)) {
+        // 「employee_code が NULL かつ both_half_holiday_count が 0」だけのケースは除外
+        if (!(count($halfHolidayCountRow) === 1 
+            && $halfHolidayCountRow[0]['employee_code'] === null 
+            && (int)$halfHolidayCountRow[0]['both_half_holiday_count'] === 0)) {
+            
+            foreach ($halfHolidayCountRow as $row) {
+                $code = str_pad((string)$row['employee_code'], 7, '0', STR_PAD_LEFT); 
+                $halfHolidayByEmp[$code] = [
+                    'both_half_holiday_count' => (int)$row['both_half_holiday_count'],
+                ];
+            }
+        }
+    }
+
     // Excel生成
-    $xlsPath = buildXlsToTempByEmployee($csvKintai, $csvKyuka, $payday, $employeesWithApplications, $contractWorkMinutes, $flexStandardMinutes, $managementPositionCodes);
+    $xlsPath = buildXlsToTempByEmployee($csvKintai, $csvKyuka, $payday, $employeesWithApplications, 
+                                        $contractWorkMinutes, $flexStandardMinutes, $managementPositionCodes, $halfHolidayByEmp);
 
     // ダウンロード名
     $downloadName = 'ProsrvImport_' . date('Ymd_His') . '.xls';
@@ -118,7 +145,19 @@ try {
     if (is_string($p2)      && is_file($p2))      @unlink($p2);
 }
 
-// ユーティリティ: YYYYMM の月末を Y/m/d で返す（例: 2025/08/31）
+// YYYMM の月初を Y/m/d で返す（例: 2025/08/01）
+function monthFirstDayYmdSlash(string $ym): string
+{
+    if (!preg_match('/^\d{6}$/', $ym)) {
+        throw new InvalidArgumentException('対象年月の形式が不正です（YYYYMM）。');
+    }
+    $y = (int)substr($ym, 0, 4);
+    $m = (int)substr($ym, 4, 2);
+    $dt = new DateTime(sprintf('%04d-%02d-01', $y, $m));
+    return $dt->format('Y/m/d');
+}
+
+// YYYYMM の月末を Y/m/d で返す（例: 2025/08/31）
 function monthLastDayYmdSlash(string $ym): string
 {
     if (!preg_match('/^\d{6}$/', $ym)) {
@@ -131,7 +170,7 @@ function monthLastDayYmdSlash(string $ym): string
     return $dt->format('Y/m/d');
 }
 
-// ユーティリティ: 1行だけ取得する薄いラッパー
+// 指定されたSQLから1行取得する
 function fetchOne(PDO $pdo, string $sqlFile, array $params): ?array
 {
     $sql  = loadSql($sqlFile);
@@ -141,7 +180,7 @@ function fetchOne(PDO $pdo, string $sqlFile, array $params): ?array
     return $row === false ? null : $row;
 }
 
-// ユーティリティ: 複数行取得
+// 指定されたSQLから複数行を取得する
 function fetchAllRows(PDO $pdo, string $sqlFile, array $params): array
 {
     $sql  = loadSql($sqlFile);
