@@ -73,12 +73,12 @@ if ($row) {
                 </div>
 
                 <div class="field">
-                    <label>【MosP】勤怠集計CSVファイル</label>
+                    <label>【MosP】勤怠集計CSVファイル　※ファイル名：「001_YYYYMMDD-YYYYMMDD.csv」</label>
                     <input type="file" name="csv1" accept=".csv" required>
                 </div>
 
                 <div class="field">
-                    <label>【MosP】休暇取得CSVファイル</label>
+                    <label>【MosP】休暇取得CSVファイル　※ファイル名：「002_YYYYMMDD-YYYYMMDD.csv」</label>
                     <input type="file" name="csv2" accept=".csv" required>
                 </div>
 
