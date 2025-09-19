@@ -145,7 +145,7 @@ try {
     if (is_string($p2)      && is_file($p2))      @unlink($p2);
 }
 
-// YYYMM の月初を Y/m/d で返す（例: 2025/08/01）
+// YYYMM の月初を Y/m/d で返す
 function monthFirstDayYmdSlash(string $ym): string
 {
     if (!preg_match('/^\d{6}$/', $ym)) {
@@ -157,7 +157,7 @@ function monthFirstDayYmdSlash(string $ym): string
     return $dt->format('Y/m/d');
 }
 
-// YYYYMM の月末を Y/m/d で返す（例: 2025/08/31）
+// YYYYMM の月末を Y/m/d で返す
 function monthLastDayYmdSlash(string $ym): string
 {
     if (!preg_match('/^\d{6}$/', $ym)) {
