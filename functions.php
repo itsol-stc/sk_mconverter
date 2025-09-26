@@ -352,10 +352,10 @@ function buildXlsToTempByEmployee(
         $rowValues = [];
 
         // --- 各種判定フラグ ---
-        $positionCode      = $kintaiRow['職位コード'] ?? null; 
+        $positionCode      = str_pad((string)$kintaiRow['職位コード'], 3, '0', STR_PAD_LEFT) ?? null;
         $isManagement      = in_array($positionCode, $managementPositionCodes, true); // 管理者
         $isFlex            = ($kintaiRow['雇用契約名称'] ?? '') === '社員FL'; // フレックス
-        $patternName       = $employeesWithApplications[$employeeCode]['pattern_name'] ?? ''; 
+        $patternName       = $employeesWithApplications[$employeeCode]['pattern_name'] ?? '';
         $isMonthly         = str_contains($patternName, '月給者'); // 月給者
         $isHourly          = str_contains($patternName, '時給者'); // 時給者
         $isChildCareWorker = str_contains($patternName, '育勤'); // 育児勤務者
@@ -372,7 +372,7 @@ function buildXlsToTempByEmployee(
         $rowValues[] = $employeeCode; // 7. 社員番号
 
         // --- 8. 出勤日数 ---
-        $rowValues[] = (int)pickVal($kintaiRow, ['出勤日数'], '0');        
+        $rowValues[] = (int) round((float) pickVal($kintaiRow, ['出勤日数'], '0'), 0, PHP_ROUND_HALF_UP); // 四捨五入   
 
         // --- 9 有休（全休）---
         $rowValues[] = (string)((int)($kyukaRow['有給休暇(全休)'] ?? 0) + (int)($kyukaRow['ストック休暇(全休)'] ?? 0));
@@ -400,7 +400,7 @@ function buildXlsToTempByEmployee(
 
             // 前有・後有を同日に取った場合は全休扱いとする
             if ($halfAm >= 1 && $halfPm >= 1 && !empty($halfHolidayByEmp[$employeeCode])) {
-                
+
                 $bothHalfHolidayCount = (int)$halfHolidayByEmp[$employeeCode]['both_half_holiday_count']; // 前有・後有を同日に取得した回数
                 $halfAm = $halfAm - $bothHalfHolidayCount; // 同日に取得した回数分「前有」から減算
                 $halfPm = $halfPm - $bothHalfHolidayCount; // 同日に取得した回数分「後有」から減算
@@ -435,11 +435,11 @@ function buildXlsToTempByEmployee(
         // --- 11. 普通残業 ---
         if ($isFlex) {
             // フレックス：フレックス基準時間を超過している時間
-            $rowValues[] = minutesOrHhmmToHourMinuteStr($flexOvertime); 
+            $rowValues[] = minutesOrHhmmToHourMinuteStr($flexOvertime);
         } elseif ($isManagement) {
             // 管理職："0.00" とする
             $rowValues[] = '0.00'; // 管理職
-        } else{
+        } else {
             // フレックス・管理職以外："法定外残業時間"に対して割増分を加算する 
             $overtime = (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0);
             if ($workMinutes > $contractWorkMinutes) {
@@ -451,9 +451,9 @@ function buildXlsToTempByEmployee(
         // --- 12. 深夜時間 ---
         $rowValues[] = pickMinutesAsHourMinuteStr($kintaiRow, ['深夜時間'], '0.00');
 
-        // --- 13. 深夜残業 ---
+        // --- 13. 深夜残業時間 ---
         if ($isFlex || $isManagement) {
-            // フレックス："0.00" とする
+            // フレックスまたは管理職："0.00" とする
             $rowValues[] = '0.00';
         } else {
             // フレックス以外：深夜残業時間
@@ -467,7 +467,7 @@ function buildXlsToTempByEmployee(
         } elseif ($isManagement) {
             // 管理職：法廷内残業時間に法定外残業時間を加算
             $sum = (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0)
-                 + (int)($kintaiRow['法定内残業時間(週40時間超除く)'] ?? 0);
+                + (int)($kintaiRow['法定内残業時間(週40時間超除く)'] ?? 0);
             $rowValues[] = minutesOrHhmmToHourMinuteStr((string)$sum);
         } else {
             // フレックス・管理職以外：法廷内残業時間
@@ -475,10 +475,17 @@ function buildXlsToTempByEmployee(
         }
 
         // --- 15. 休日出勤 --- 
-        $rowValues[] = '0.00'; 
+        $rowValues[] = '0.00';
 
         // --- 16. 減給時間 ---
-        $rowValues[] = $isFlex ? minutesOrHhmmToHourMinuteStr($flexPaycut) : ($isManagement ? '0.00' : pickMinutesAsHourMinuteStr($kintaiRow, ['減額対象時間'], '-'));
+
+        // 無欠無給の日数×7時間55分を計算
+        $addMinutesUnpaidFullDays = 0;
+        $addMinutesUnpaidFullDays = (int)pickVal($kyukaRow, ['無欠無給(全休)【29】'], '-') * 475;
+
+        $rowValues[] = $isFlex ?
+            minutesOrHhmmToHourMinuteStr($flexPaycut + $addMinutesUnpaidFullDays) : ($isManagement ?
+                '0.00' : minutesOrHhmmToHourMinuteStr((int)$kintaiRow['減額対象時間'] + $addMinutesUnpaidFullDays));
 
         // --- その他休暇・欠勤など ---
         $rowValues[] = '0'; // 17. 病欠100
