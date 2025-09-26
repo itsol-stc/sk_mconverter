@@ -372,7 +372,7 @@ function buildXlsToTempByEmployee(
         $rowValues[] = $employeeCode; // 7. 社員番号
 
         // --- 8. 出勤日数 ---
-        $rowValues[] = (int) round((float) pickVal($kintaiRow, ['出勤日数'], '0'), 0, PHP_ROUND_HALF_UP); // 四捨五入   
+        $rowValues[] = (int) round((float) pickVal($kintaiRow, ['出勤回数'], '0'), 0, PHP_ROUND_HALF_UP); // 四捨五入   
 
         // --- 9 有休（全休）---
         $rowValues[] = (string)((int)($kyukaRow['有給休暇(全休)'] ?? 0) + (int)($kyukaRow['ストック休暇(全休)'] ?? 0));
