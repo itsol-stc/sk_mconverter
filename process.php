@@ -110,8 +110,10 @@ try {
     }
 
     // Excel生成
-    $xlsPath = buildXlsToTempByEmployee($csvKintai, $csvKyuka, $payday, $employeesWithApplications, 
+    $result = buildXlsToTempByEmployee($csvKintai, $csvKyuka, $payday, $employeesWithApplications, 
                                         $contractWorkMinutes, $flexStandardMinutes, $managementPositionCodes, $halfHolidayByEmp);
+    $xlsPath = $result['out'];
+    $excelValues = $result['excelValues'];
 
     // ダウンロード名
     $downloadName = 'ProsrvImport_' . date('Ymd_His') . '.xls';

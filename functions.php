@@ -328,7 +328,7 @@ function buildXlsToTempByEmployee(
     int $flexStandardMinutes,
     array $managementPositionCodes,
     array $halfHolidayByEmp
-): string {
+) {
     if (!is_file(TEMPLATE_XLS)) {
         throw new RuntimeException('template.xls が見つかりません。');
     }
@@ -521,10 +521,15 @@ function buildXlsToTempByEmployee(
         $rowIndex++;
     }
 
+    $excelValues = [];
+
     // 出力ファイルを一時ディレクトリに保存
     $out = tempnam(sys_get_temp_dir(), 'xls_') . '.xls';
     IOFactory::createWriter($spreadsheet, 'Xls')->save($out);
-    return $out;
+    return [
+        'out' => $out,
+        'excelValues' => $excelValues
+    ];
 }
 
 
