@@ -11,6 +11,7 @@ const SQL_CONTRACT_WORKTIME = 'get_contract_worktime.sql';
 const SQL_FLEX_STANDARDS    = 'get_flex_standards.sql';
 const SQL_POSITION          = 'get_position_master.sql';
 const SQL_HALF_HOLIDAY      = 'select_both_half_holiday_count.sql';
+const SQL_INSERT_PROSRV_IMPORT = 'insert_prosrv_import.sql';
 
 // 初期化
 ensureDirs();
@@ -49,6 +50,12 @@ try {
     // CSV読込
     $csvKintai = loadCsv($p1);
     $csvKyuka  = loadCsv($p2);
+
+    // 勤怠集計及び休暇取得のCSVにデータが存在するか確認
+    if (empty($csvKintai) || empty($csvKyuka)) {
+        throw new Exception('勤怠集計CSVあるいは休暇取得CSVにデータが存在しません。');
+    }
+
 
     // 人事管理マスタを取得
     $empResult = fetchAllRows($pdo_mosp, SQL_HUMAN_STATUS, [
@@ -114,6 +121,34 @@ try {
                                         $contractWorkMinutes, $flexStandardMinutes, $managementPositionCodes, $halfHolidayByEmp);
     $xlsPath = $result['out'];
     $excelValues = $result['excelValues'];
+
+    // SaiAttendanceDBの prosrv_import テーブルにデータを挿入する
+    // 勤怠集計対象日付
+    $target_date = monthFirstDayYmdSlash($targetMonth);
+
+    // 連想配列にしたExcel出力データ配列 excelValues をパラメータとして利用する
+    foreach ($excelValues as $row) {
+        $params = array_combine(
+            keys:[
+                ':customer_no', ':company_no', ':category', ':payment_date', ':process_type', ':process_class', ':employee_no', ':work_days', ':paid_leave',
+                ':work_hours', ':overtime_normal', ':midnight_hours', ':midnight_overtime', ':legal_overtime', ':holiday_work_hours', ':deduction_hours', ':sick_100',
+                ':sick_150', ':recogn_sick_75', ':substitute_leave', ':exchange_leave', ':holiday', ':prev_paid_leave', ':next_paid_leave', ':prev_term_leave',
+                ':next_term_leave', ':public_holiday', ':prev_substitute', ':condolence_leave', ':marriage_leave', ':maternity_paid', ':maternity_unpaid',
+                ':childcare_leave', ':nursing_leave', ':unpaid_absence', ':unpaid_nursing', ':unpaid_birth', ':industrial_accident', ':disaster_leave', ':childcare_work',
+                ':nursing_work', ':target_date'],
+            values:[
+                $row['customer_number'],$row['company_code'],$row['category'],$row['payday'],$row['process_type'],$row['process_subtype'],$row['employee_number'],$row['work_days'],$row['paid_holiday_full'],
+                $row['work_time'],$row['normal_overtime'],$row['late_night_time'],$row['late_night_overtime'],$row['legal_overtime'],$row['holiday_work'],$row['paycut_time'],$row['sick_leave_100'],
+                $row['sick_leave_150'],$row['ninketsu_75'],$row['substitute_holiday'],$row['alternating_holiday'],$row['public_holiday'],$row['paid_holiday_half_am'],$row['paid_holiday_half_pm'],$row['special_holiday_am'],
+                $row['special_holiday_pm'],$row['official_holiday'],$row['substitute_holiday_am'],$row['bereavement_leave'],$row['marriage_leave'],$row['maternity_leave_paid'],$row['maternity_leave_unpaid'],
+                $row['childcare_leave'],$row['nursing_care_leave'],$row['unpaid_leave'],$row['nursing_care_unpaid'],$row['menstruation_leave'],$row['workers_compensation'],$row['disaster_leave'],$row['childcare_work'],
+                $row['nursing_care_work'], $target_date
+            ]
+        );
+
+        // prosrv_import テーブルに追加する（employee_noとtarget_dateの組み合わせが既に存在する場合は更新）
+        insert_prosrv_import($pdo_sai, SQL_INSERT_PROSRV_IMPORT, $params);
+    }
 
     // ダウンロード名
     $downloadName = 'ProsrvImport_' . date('Ymd_His') . '.xls';
@@ -189,4 +224,12 @@ function fetchAllRows(PDO $pdo, string $sqlFile, array $params): array
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// prosrv_importテーブルにデータを挿入する
+function insert_prosrv_import(PDO $pdo, string $sqlFile, array $params)
+{
+    $sql  = loadSql($sqlFile);
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
 }
