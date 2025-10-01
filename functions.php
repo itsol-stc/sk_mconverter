@@ -346,6 +346,8 @@ function buildXlsToTempByEmployee(
 
     // prosrv_importテーブルに登録するデータを格納する配列
     $excelValues = [];
+    // varied_overtime_employee テーブルに登録するデータを格納する配列
+    $variedOvertimeValues = [];
 
     foreach ($employeeCodes as $employeeCode) {
         $kintaiRow = $csvKintai[$employeeCode] ?? [];
@@ -436,17 +438,28 @@ function buildXlsToTempByEmployee(
         }
 
         // --- 11. 普通残業 ---
+        $overtime_nomal_raw = 0; // 調整前残業時間を格納する変数を初期化
+        $contractWorkMinutesOvertime = 0; // 所定時間超過分を格納する変数を初期化
+        $isContractWorkMinutesOver = false; // 変形労働割増対象者フラグ
         if ($isFlex) {
             // フレックス：フレックス基準時間を超過している時間
             $rowValues[] = minutesOrHhmmToHourMinuteStr($flexOvertime);
         } elseif ($isManagement) {
             // 管理職："0.00" とする
             $rowValues[] = '0.00'; // 管理職
-        } else {
+        } else { 
             // フレックス・管理職以外："法定外残業時間"に対して割増分を加算する 
             $overtime = (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0);
             if ($workMinutes > $contractWorkMinutes) {
-                $overtime += $workMinutes - $contractWorkMinutes;
+                // 変形労働割増対象者フラグをたてる
+                $isContractWorkMinutesOver = true;
+                // 調整前残業時間を格納
+                $overtime_nomal_raw = $overtime;
+
+                // 超過時間を計算
+                $contractWorkMinutesOvertime = $workMinutes - $contractWorkMinutes;
+                // 所定時間を超過している分を加算
+                $overtime += $contractWorkMinutesOvertime;
             }
             $rowValues[] = minutesOrHhmmToHourMinuteStr((string)$overtime);
         }
@@ -566,6 +579,20 @@ function buildXlsToTempByEmployee(
             'childcare_work'       => $rowValues[39], // 40. 育勤
             'nursing_care_work'    => $rowValues[40], // 41. 介勤
         ];
+
+        // 変形労働割増対象者の場合、
+        if($isContractWorkMinutesOver){
+            // varied_overtime_employee テーブルに格納するデータを連想配列で格納
+            $variedOvertimeValues[] = [
+                'employee_number' => $employeeCode, // 社員番号
+                'work_time'       => $workMinutes, // 勤務時間 
+                'overtime_nomal_raw' => $overtime_nomal_raw , // 調整前残業時間（分）
+                'contractWorkMinutes' => $contractWorkMinutes, // 基準時間（分）
+                'overtime_nomal_adjusted' => $overtime, // 調整後残業時間（分）
+                'contractWorkMinutesOvertime' => $contractWorkMinutesOvertime, // 所定時間超過分（分）
+
+            ];   
+        }   
         
         $rowIndex++;
     }
@@ -575,7 +602,8 @@ function buildXlsToTempByEmployee(
     IOFactory::createWriter($spreadsheet, 'Xls')->save($out);
     return [
         'out' => $out,
-        'excelValues' => $excelValues
+        'excelValues' => $excelValues,
+        'variedOvertimeValues' => $variedOvertimeValues
     ];
 }
 

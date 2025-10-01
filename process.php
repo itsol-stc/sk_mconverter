@@ -12,6 +12,7 @@ const SQL_FLEX_STANDARDS    = 'get_flex_standards.sql';
 const SQL_POSITION          = 'get_position_master.sql';
 const SQL_HALF_HOLIDAY      = 'select_both_half_holiday_count.sql';
 const SQL_INSERT_PROSRV_IMPORT = 'insert_prosrv_import.sql';
+const SQL_INSERT_VARIED_OVERTIME_EMPLOYEE = 'insert_varied_overtime_employee.sql';
 
 // 初期化
 ensureDirs();
@@ -121,6 +122,7 @@ try {
                                         $contractWorkMinutes, $flexStandardMinutes, $managementPositionCodes, $halfHolidayByEmp);
     $xlsPath = $result['out'];
     $excelValues = $result['excelValues'];
+    $variedOvertimeValues = $result['variedOvertimeValues'];
 
     // SaiAttendanceDBの prosrv_import テーブルにデータを挿入する
     // 勤怠集計対象日付
@@ -128,7 +130,8 @@ try {
 
     // 連想配列にしたExcel出力データ配列 excelValues をパラメータとして利用する
     foreach ($excelValues as $row) {
-        $params = array_combine(
+        // prosrv_import テーブルに追加するパラメータ配列を作成
+        $prosrv_import_params = array_combine(
             keys:[
                 ':customer_no', ':company_no', ':category', ':payment_date', ':process_type', ':process_class', ':employee_no', ':work_days', ':paid_leave',
                 ':work_hours', ':overtime_normal', ':midnight_hours', ':midnight_overtime', ':legal_overtime', ':holiday_work_hours', ':deduction_hours', ':sick_100',
@@ -147,7 +150,26 @@ try {
         );
 
         // prosrv_import テーブルに追加する（employee_noとtarget_dateの組み合わせが既に存在する場合は更新）
-        insert_prosrv_import($pdo_sai, SQL_INSERT_PROSRV_IMPORT, $params);
+        insertRows($pdo_sai, SQL_INSERT_PROSRV_IMPORT, $prosrv_import_params);
+    }
+
+    // 連想配列にした変形労働対象者データ配列にデータがある場合、 varied_overtime_employee テーブルに追加する
+    if(!empty($variedOvertimeValues)){
+        
+        // varied_overtime_employee テーブルに追加するパラメータ配列を作成
+        foreach($result['variedOvertimeValues'] as $vrow){
+            $varied_overtime_employee_params = array_combine(
+                keys:[
+                    ':employee_no',':target_date',':work_hours',':normal_overtime_raw',
+                    ':work_minutes',':normal_overtime_adj', ':contract_workminutes_overtime'],
+                values:[
+                    $vrow['employee_number'], $target_date, $vrow['work_time'], $vrow['overtime_nomal_raw'],
+                    $vrow['contractWorkMinutes'], $vrow['overtime_nomal_adjusted'], $vrow['contractWorkMinutesOvertime']
+                    ]
+            );
+        // varied_overtime_employee テーブルに追加する（employee_noとtarget_dateの組み合わせが既に存在する場合は更新）
+        insertRows($pdo_sai,SQL_INSERT_VARIED_OVERTIME_EMPLOYEE, $varied_overtime_employee_params);
+        }
     }
 
     // ダウンロード名
@@ -226,8 +248,8 @@ function fetchAllRows(PDO $pdo, string $sqlFile, array $params): array
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
-// prosrv_importテーブルにデータを挿入する
-function insert_prosrv_import(PDO $pdo, string $sqlFile, array $params)
+// 指定されたSQLでテーブルにデータを挿入する
+function insertRows(PDO $pdo, string $sqlFile, array $params)
 {
     $sql  = loadSql($sqlFile);
     $stmt = $pdo->prepare($sql);
