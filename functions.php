@@ -585,12 +585,11 @@ function buildXlsToTempByEmployee(
             // varied_overtime_employee テーブルに格納するデータを連想配列で格納
             $variedOvertimeValues[] = [
                 'employee_number' => $employeeCode, // 社員番号
-                'work_time'       => $workMinutes, // 勤務時間 
-                'overtime_nomal_raw' => $overtime_nomal_raw , // 調整前残業時間（分）
+                'work_time'       => $rowValues[9], // 勤務時間 
+                'overtime_nomal_raw' => minutesOrHhmmToHourMinuteStr((string)$overtime_nomal_raw) , // 調整前残業時間（分）
                 'contractWorkMinutes' => $contractWorkMinutes, // 基準時間（分）
-                'overtime_nomal_adjusted' => $overtime, // 調整後残業時間（分）
-                'contractWorkMinutesOvertime' => $contractWorkMinutesOvertime, // 所定時間超過分（分）
-
+                'overtime_nomal_adjusted' => $rowValues[10], // 調整後残業時間（分）
+                'contractWorkMinutesOvertime' => minutesOrHhmmToHourMinuteStr((string)$contractWorkMinutesOvertime), // 所定時間超過分（分）
             ];   
         }   
         
