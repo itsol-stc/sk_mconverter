@@ -317,7 +317,11 @@ function minutesOrHhmmToHourMinuteStr(string $v): string
  * @param int    $flexStandardMinutes       フレックス基準時間（分）
  * @param array  $managementPositionCodes   管理職の職位コード配列
  * @param array  $halfHolidayByEmp          前有・後有を同日に取得した社員のリスト
- * @return string 生成された XLS ファイルのパス
+ * @return array{
+ *     out: mixed,
+ *     excelValues: array,
+ *     variedOvertimeValues: array
+ * }
  */
 function buildXlsToTempByEmployee(
     array $csvKintai,
