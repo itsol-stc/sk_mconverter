@@ -328,7 +328,7 @@ function buildXlsToTempByEmployee(
     int $flexStandardMinutes,
     array $managementPositionCodes,
     array $halfHolidayByEmp
-) {
+): array{
     if (!is_file(TEMPLATE_XLS)) {
         throw new RuntimeException('template.xls が見つかりません。');
     }
@@ -343,6 +343,11 @@ function buildXlsToTempByEmployee(
 
     // 勤怠集計CSV、休暇取得CSVの両方に存在する社員コードを抽出
     $employeeCodes = unionEmployeeCodes($csvKintai, $csvKyuka);
+
+    // prosrv_importテーブルに登録するデータを格納する配列
+    $excelValues = [];
+    // varied_overtime_employee テーブルに登録するデータを格納する配列
+    $variedOvertimeValues = [];
 
     foreach ($employeeCodes as $employeeCode) {
         $kintaiRow = $csvKintai[$employeeCode] ?? [];
@@ -433,17 +438,28 @@ function buildXlsToTempByEmployee(
         }
 
         // --- 11. 普通残業 ---
+        $overtime_nomal_raw = 0; // 調整前残業時間を格納する変数を初期化
+        $contractWorkMinutesOvertime = 0; // 所定時間超過分を格納する変数を初期化
+        $isContractWorkMinutesOver = false; // 変形労働割増対象者フラグ
         if ($isFlex) {
             // フレックス：フレックス基準時間を超過している時間
             $rowValues[] = minutesOrHhmmToHourMinuteStr($flexOvertime);
         } elseif ($isManagement) {
             // 管理職："0.00" とする
             $rowValues[] = '0.00'; // 管理職
-        } else {
+        } else { 
             // フレックス・管理職以外："法定外残業時間"に対して割増分を加算する 
             $overtime = (int)($kintaiRow['法定外残業時間(週40時間超除く)'] ?? 0);
             if ($workMinutes > $contractWorkMinutes) {
-                $overtime += $workMinutes - $contractWorkMinutes;
+                // 変形労働割増対象者フラグをたてる
+                $isContractWorkMinutesOver = true;
+                // 調整前残業時間を格納
+                $overtime_nomal_raw = $overtime;
+
+                // 超過時間を計算
+                $contractWorkMinutesOvertime = $workMinutes - $contractWorkMinutes;
+                // 所定時間を超過している分を加算
+                $overtime += $contractWorkMinutesOvertime;
             }
             $rowValues[] = minutesOrHhmmToHourMinuteStr((string)$overtime);
         }
@@ -511,24 +527,82 @@ function buildXlsToTempByEmployee(
         $rowValues[] = pickVal($kyukaRow, ['生理休暇（無給）(全休)【26】'], '-'); // 37. 生休（無給）
         $rowValues[] = pickVal($kyukaRow, ['労災欠勤(全休)【45】'], '-');  // 38. 労災
         $rowValues[] = pickVal($kyukaRow, ['災害休暇(全休)【46】'], '-');  // 39. 労災
-        $rowValues[] = '0'; // 40 育勤
-        $rowValues[] = '0'; // 41 介勤
+        $rowValues[] = '0'; // 40. 育勤
+        $rowValues[] = '0'; // 41. 介勤
 
         // --- Excelへ書き込み ---
         foreach ($rowValues as $colIndex => $value) {
             $sheet->setCellValueExplicit(xlCol($colIndex + 2) . $rowIndex, $value, DataType::TYPE_STRING);
         }
+
+        // prosrv_importテーブルに登録するデータを連想配列で格納
+        $excelValues[] = [
+            'customer_number'      => $rowValues[0],  // 1. お客様番号
+            'company_code'         => $rowValues[1],  // 2. 給与会社番号
+            'category'             => $rowValues[2],  // 3. 区分
+            'payday'               => $rowValues[3],  // 4. 支給年月日
+            'process_type'         => $rowValues[4],  // 5. 処理種別
+            'process_subtype'      => $rowValues[5],  // 6. 処理種別分類
+            'employee_number'      => $rowValues[6],  // 7. 社員番号
+            'work_days'            => $rowValues[7],  // 8. 出勤日数
+            'paid_holiday_full'    => $rowValues[8],  // 9. 有休（全休）
+            'work_time'            => $rowValues[9],  // 10. 勤務時間
+            'normal_overtime'      => $rowValues[10], // 11. 普通残業
+            'late_night_time'      => $rowValues[11], // 12. 深夜時間
+            'late_night_overtime'  => $rowValues[12], // 13. 深夜残業時間
+            'legal_overtime'       => $rowValues[13], // 14 法定内残業
+            'holiday_work'         => $rowValues[14], // 15. 休日出勤
+            'paycut_time'          => $rowValues[15], // 16. 減給時間
+            'sick_leave_100'       => $rowValues[16], // 17. 病欠100
+            'sick_leave_150'       => $rowValues[17], // 18. 病欠150
+            'ninketsu_75'          => $rowValues[18], // 19. 認欠75
+            'substitute_holiday'   => $rowValues[19], // 20. 振休
+            'alternating_holiday'  => $rowValues[20], // 21. 交休
+            'public_holiday'       => $rowValues[21], // 22. 休日
+            'paid_holiday_half_am' => $rowValues[22], // 23. 前有
+            'paid_holiday_half_pm' => $rowValues[23], // 24. 後有
+            'special_holiday_am'   => $rowValues[24], // 25. 前期
+            'special_holiday_pm'   => $rowValues[25], // 26. 後期
+            'official_holiday'     => $rowValues[26], // 27. 公休
+            'substitute_holiday_am'=> $rowValues[27], // 28. 前振
+            'bereavement_leave'    => $rowValues[28], // 29. 忌引
+            'marriage_leave'       => $rowValues[29], // 30. 結婚
+            'maternity_leave_paid' => $rowValues[30], // 31. 産有
+            'maternity_leave_unpaid'=> $rowValues[31],// 32. 産無
+            'childcare_leave'      => $rowValues[32], // 33. 育職
+            'nursing_care_leave'   => $rowValues[33], // 34. 介職
+            'unpaid_leave'         => $rowValues[34], // 35. 無欠（無給）
+            'nursing_care_unpaid'  => $rowValues[35], // 36. 看休（無給）
+            'menstruation_leave'   => $rowValues[36], // 37. 生休（無給）
+            'workers_compensation' => $rowValues[37], // 38. 労災
+            'disaster_leave'       => $rowValues[38], // 39. 労災
+            'childcare_work'       => $rowValues[39], // 40. 育勤
+            'nursing_care_work'    => $rowValues[40], // 41. 介勤
+        ];
+
+        // 変形労働割増対象者の場合、
+        if($isContractWorkMinutesOver){
+            // varied_overtime_employee テーブルに格納するデータを連想配列で格納
+            $variedOvertimeValues[] = [
+                'employee_number' => $employeeCode, // 社員番号
+                'work_time'       => $rowValues[9], // 勤務時間 
+                'overtime_nomal_raw' => minutesOrHhmmToHourMinuteStr((string)$overtime_nomal_raw) , // 調整前残業時間（分）
+                'contractWorkMinutes' => $contractWorkMinutes, // 基準時間（分）
+                'overtime_nomal_adjusted' => $rowValues[10], // 調整後残業時間（分）
+                'contractWorkMinutesOvertime' => minutesOrHhmmToHourMinuteStr((string)$contractWorkMinutesOvertime), // 所定時間超過分（分）
+            ];   
+        }   
+        
         $rowIndex++;
     }
-
-    $excelValues = [];
 
     // 出力ファイルを一時ディレクトリに保存
     $out = tempnam(sys_get_temp_dir(), 'xls_') . '.xls';
     IOFactory::createWriter($spreadsheet, 'Xls')->save($out);
     return [
         'out' => $out,
-        'excelValues' => $excelValues
+        'excelValues' => $excelValues,
+        'variedOvertimeValues' => $variedOvertimeValues
     ];
 }
 
