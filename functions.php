@@ -505,7 +505,7 @@ function buildXlsToTempByEmployee(
 
         $rowValues[] = $isFlex ?
             minutesOrHhmmToHourMinuteStr($flexPaycut + $addMinutesUnpaidFullDays) : ($isManagement ?
-                minutesOrHhmmToHourMinuteStr((int)$kintaiRow['減額対象時間'] + $addMinutesUnpaidFullDays) : minutesOrHhmmToHourMinuteStr((int)$kintaiRow['減額対象時間'] + $addMinutesUnpaidFullDays));
+                minutesOrHhmmToHourMinuteStr(0 + $addMinutesUnpaidFullDays) : minutesOrHhmmToHourMinuteStr((int)$kintaiRow['減額対象時間'] + $addMinutesUnpaidFullDays));
 
         // --- その他休暇・欠勤など ---
         $rowValues[] = '0'; // 17. 病欠100
