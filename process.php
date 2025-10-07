@@ -13,6 +13,34 @@ const SQL_POSITION          = 'get_position_master.sql';
 const SQL_HALF_HOLIDAY      = 'select_both_half_holiday_count.sql';
 const SQL_INSERT_PROSRV_IMPORT = 'insert_prosrv_import.sql';
 const SQL_INSERT_VARIED_OVERTIME_EMPLOYEE = 'insert_varied_overtime_employee.sql';
+const SQL_INSERT_EMPLOYEE_ATTENDANCE_RATE = 'insert_employee_attendance_rate.sql';
+const SQL_SELECT_SHIFT_SCHEDULE_WITH_WORKTYPE = 'select_shift_schedule_with_worktype.sql';
+const SQL_SELECT_SHIFT_WORKTYPE_CHANGE_REQUEST = 'select_shift_worktype_change_request.sql';
+const SQL_SELECT_SHIFT_HOLIDAY_REQUEST = 'select_shift_holiday_request.sql';
+const SQL_SELECT_HOLIDAY = 'select_holiday.sql';
+
+const HOLIDAY_MASTER_CODE_Dictionary = [
+    '13' => 'substitute_holiday_am',    // 前振
+    '18' => 'special_holiday_am',    // 前期特別休暇
+    '19' => 'special_holiday_pm',    // 後期特別休暇
+    '20' => 'marriage_leave',    // 結婚休暇
+    '22' => 'bereavement_leave',    // 忌引休暇
+    '23' => 'maternity_leave_paid',    // 産休（有給）
+    '25' => 'maternity_leave_unpaid',    // 産休（無給）
+    '26' => 'menstruation_leave',    // 生理休暇（無給）
+    '27' => 'nursing_care_unpaid',    // 介護・看護休暇（無給）
+    '28' => 'public_holiday',    // 休日
+    '29' => 'unpaid_leave',    // 無欠無給
+    '38' => 'sick_leave_150',    // 病欠150
+    '39' => 'recuperation_80',    // 療養80
+    '40' => 'childcare_leave',    // 育児休暇
+    '41' => 'nursing_care_leave',    // 介護休暇
+    '43' => 'attendance_stop',    // 出勤停止
+    '44' => 'official_holiday',    // 公休
+    '45' => 'workers_compensation',    // 労災欠勤
+    '46' => 'disaster_leave',    // 災害休暇
+];
+
 
 // 初期化
 ensureDirs();
@@ -117,15 +145,15 @@ try {
         }
     }
 
-    // Excel生成
+    // Excel生成、DB登録
     $result = buildXlsToTempByEmployee($csvKintai, $csvKyuka, $payday, $employeesWithApplications, 
                                         $contractWorkMinutes, $flexStandardMinutes, $managementPositionCodes, $halfHolidayByEmp);
-    $xlsPath = $result['out'];
-    $excelValues = $result['excelValues'];
-    $variedOvertimeValues = $result['variedOvertimeValues'];
+    $xlsPath = $result['out'];      // 生成されたExcelファイルのパス
+    $excelValues = $result['excelValues'];      // Excel出力データ
+    $variedOvertimeValues = $result['variedOvertimeValues'];                                // 変形労働対象者データ
+    $attendanceDataForAttendanceRateCal = $result['attendanceDataForAttendanceRateCal'];    // 出勤率データを作成するための勤怠データ
 
-    // SaiAttendanceDBの prosrv_import テーブルにデータを挿入する
-    // 勤怠集計対象日付
+    // SaiAttendanceDBのテーブルにデータを挿入する 勤怠集計対象日付 を変数に格納する
     $target_date = monthFirstDayYmdSlash($targetMonth);
 
     // 連想配列にしたExcel出力データ配列 excelValues をパラメータとして利用する
@@ -155,7 +183,6 @@ try {
 
     // 連想配列にした変形労働対象者データ配列にデータがある場合、 varied_overtime_employee テーブルに追加する
     if(!empty($variedOvertimeValues)){
-        
         // varied_overtime_employee テーブルに追加するパラメータ配列を作成
         foreach($result['variedOvertimeValues'] as $vrow){
             $varied_overtime_employee_params = array_combine(
@@ -169,6 +196,52 @@ try {
             );
         // varied_overtime_employee テーブルに追加する（employee_noとtarget_dateの組み合わせが既に存在する場合は更新）
         insertRows($pdo_sai,SQL_INSERT_VARIED_OVERTIME_EMPLOYEE, $varied_overtime_employee_params);
+        }
+    }
+    
+    // シフト表を取得する
+    $shift = getShiftTable($pdo_mosp, $firstDayForRef, $lastDayForRef, $employeesWithApplications);
+    
+    // シフト表から対象社員のシフトデータを抽出する    
+    foreach($excelValues as $ev){
+        $empCode = $ev['employee_number'];
+
+        // 該当社員のシフトデータを取得する
+        foreach($shift as $s){
+            if($s['employee_code'] === $empCode){
+                $reShift[] = $s;
+            }
+        }
+    }
+    
+    // 月初時点で有効な最新の休暇種別マスタを取得する
+    $holidayTypesMaster = fetchAllRows($pdo_mosp, SQL_SELECT_HOLIDAY, [':target_date'  => $firstDayForRef]);
+
+    // 予定出勤日数・予定公休日数を格納した連想配列を取得する
+    $CalcForShiftArray = getPlannedWorkingDaysAndHolidays($reShift);
+
+    
+    // 社員別出勤率データを格納した連想配列を取得する
+    $employeeAttendanceRateArray = getEmployeeAttendanceRateArray(
+        $attendanceDataForAttendanceRateCal, $CalcForShiftArray, $holidayTypesMaster);
+    
+
+    // 連想配列にした社員別出勤率データ配列にデータがある場合、 employee_attendance_rate テーブルに追加する
+    if(!empty($employeeAttendanceRateArray)){
+        // employee_attendance_rate テーブルに追加するパラメータ配列を作成
+        foreach($employeeAttendanceRateArray as $arow){
+            $employee_attendance_rate_params = array_combine(
+                keys:[
+                    ':employee_code', ':ym', ':planned_working_days', ':planned_holidays', ':actual_working_days',
+                    ':actual_attendance_rate', ':paid_leave_calc_working_days', ':paid_leave_calc_attendance_rate'
+                ],
+                values:[
+                    $arow['employee_number'], $targetMonth, $arow['planned_working_days'], $arow['planned_holidays'], $arow['actual_working_days'],
+                    $arow['actual_attendance_rate'], $arow['paid_leave_calc_working_days'], $arow['paid_leave_calc_attendance_rate']
+                ]
+            );
+            // employee_attendance_rate テーブルに追加する（employee_noとtarget_dateの組み合わせが既に存在する場合は更新）
+            insertRows($pdo_sai, SQL_INSERT_EMPLOYEE_ATTENDANCE_RATE, $employee_attendance_rate_params);
         }
     }
 
@@ -254,4 +327,182 @@ function insertRows(PDO $pdo, string $sqlFile, array $params)
     $sql  = loadSql($sqlFile);
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
+}
+
+
+/**
+ * シフト表を取得する
+ * 
+ */
+function getShiftTable(PDO $pdo, $firstDayForRef, $lastDayForRef ,$employeesWithApplications): array{
+    // 範囲パラメータ作成
+    $scheParams = [
+        'target_date'     => $firstDayForRef,
+        'termStart_date'  => $firstDayForRef,
+        'termEnd_date'    => $lastDayForRef
+    ];
+    $holidayParams = [
+        'termStart_date'  => $firstDayForRef,
+        'termEnd_date'    => $lastDayForRef
+    ];
+
+    // データ取得（SQL実行）
+    $scheResult      = fetchAllRows($pdo, SQL_SELECT_SHIFT_SCHEDULE_WITH_WORKTYPE, $scheParams);
+    $workchngResult  = fetchAllRows($pdo, SQL_SELECT_SHIFT_WORKTYPE_CHANGE_REQUEST,['target_date' => $firstDayForRef]);
+    $holidayResult   = fetchAllRows($pdo, SQL_SELECT_SHIFT_HOLIDAY_REQUEST, $holidayParams);
+
+    // 各種データ結合処理
+    $shift = getShift($employeesWithApplications, $scheResult, $workchngResult, $holidayResult);
+
+    return $shift;
+}
+
+/**
+ * 予定出勤日数・予定公休日数を取得する
+ * 社員番号ごとに連想配列を作成する
+ */
+function getPlannedWorkingDaysAndHolidays($shift): array{
+    
+    // 戻り値となる連想配列を初期化
+    $empWorkResult = [];
+    
+    // 社員番号ごとに連想配列を作成する
+    // 社員番号を格納する変数を初期化
+    $employee_code = 0; 
+    
+    
+    foreach($shift as $shiftRow){
+        $employee_code = $shiftRow['employee_code'];
+
+        $prescribed_holiday = 0;    // 振替休日
+        $legal_holiday = 0;      // 交替休日
+        $work_day = 0;         // 出勤日
+        
+        foreach($shiftRow['schedule_code'] as $sche){
+                // work_type_code ごとに判定する
+                $work_type_code = $sche['work_type_code'];
+
+                switch($work_type_code){
+                    case 'prescribed_holiday': // 振替休日
+                        $prescribed_holiday += 1;
+                        break;
+
+                    case 'legal_holiday': // 交替休日
+                        $legal_holiday += 1;
+                        break;
+                    
+                    case '': // 空欄の日
+                        // $empWorkShiftResult[$employee_code]['planned_holidays'] += 1;
+                        break;
+                    default:    // それ以外の勤務形態コード(出勤日)
+                        $work_day += 1;
+                        break;
+                }
+        }
+        // 予定出勤日数・予定公休日数を変数に格納する
+                $empWorkResult[$employee_code] = [
+                    'planned_working_days' => $work_day,     // 予定出勤日数
+                    'planned_holidays' => $prescribed_holiday + $legal_holiday,  // 予定公休日数
+                ];
+    }    
+
+    // 社員番号ごとの連想配列を返す
+    return $empWorkResult;
+}
+
+
+/**
+ * 社員別出勤率データを格納した連想配列を返す
+ * 
+ */
+function getEmployeeAttendanceRateArray($attendanceDataForAttendanceRateCal, $CalcForShiftArray, $holidayTypesMaster): array{
+    // 戻り値となる連想配列を初期化する
+    $employeeAttendanceRateArray = [];
+
+    // 休暇マスタを「出勤扱い」「欠勤扱い」「計算対象外」に分類する
+    $paidLeaveTypes = [];   // 出勤扱い休暇
+    $absentLeaveTypes = []; // 欠勤扱い休暇
+    $nonCalcLeaveTypes = []; // 計算対象外休暇
+    foreach($holidayTypesMaster as $htm){
+        $code = $htm['holiday_code'];
+        $calc_type = $htm['paid_holiday_calc'];
+        switch($calc_type){
+            case '1': // 出勤扱い
+                $paidLeaveTypes[] = $code;
+                break;
+            case '2': // 欠勤扱い
+                $absentLeaveTypes[] = $code;
+                break;
+            case '3': // 計算対象外
+                $nonCalcLeaveTypes[] = $code;
+                break;
+            default:
+                // それ以外は無視
+                break;
+        }
+    }
+        
+        // 出勤率計算用の勤怠データから該当社員のデータを取得する
+        foreach($attendanceDataForAttendanceRateCal as $adfar){            
+            $employee_code = $adfar['employee_number'];   // 社員番号 
+
+            // --- 実出勤日数 ---
+            $actual_working_days = $adfar['work_days'];
+            
+            // --- 各休暇取得日数 --
+            $paid_leave_calc_working_holidays = 0;  // 出勤扱い休暇 
+            $absent_holiday_days = 0;   // 欠勤扱い休暇
+            $non_calc_holiday_days = 0; // 計算対象外休暇
+
+            // 出勤扱い休暇を取得日数に加算する
+            $paid_leave_calc_working_holidays = calcHolidayDaysForAttendanceRate($paidLeaveTypes, $adfar);
+            // 欠勤扱い休暇を取得日数に加算する
+            $absent_holiday_days = calcHolidayDaysForAttendanceRate($absentLeaveTypes, $adfar);
+            // 計算対象外休暇を取得日数に加算する
+            $non_calc_holiday_days = calcHolidayDaysForAttendanceRate($nonCalcLeaveTypes, $adfar);
+
+            // --- 有給計算用出勤日数(実出勤日数 + 年次有給休暇取得日数 + 出勤扱いになる休日数) ---
+            $paid_leave_calc_working_days = $actual_working_days + $adfar['paid_holiday_total'] + $paid_leave_calc_working_holidays;
+
+            // --- 実出勤率(実出勤日数 / 予定出勤日数) ---
+            $actual_attendance_rate = 0.0;
+            if(isset($CalcForShiftArray[$employee_code]) && $CalcForShiftArray[$employee_code]['planned_working_days'] > 0){
+                $actual_attendance_rate = round($actual_working_days / $CalcForShiftArray[$employee_code]['planned_working_days'], 4)*100;
+            }
+
+            // --- 有給計算用出勤率(有給計算用出勤日数 / （予定出勤日数 - 計算対象外休暇日数）) ---
+            $paid_leave_calc_attendance_rate = 0.0;
+            if(isset($CalcForShiftArray[$employee_code]) && $CalcForShiftArray[$employee_code]['planned_working_days'] > 0){
+                $paid_leave_calc_attendance_rate = round($paid_leave_calc_working_days / ($CalcForShiftArray[$employee_code]['planned_working_days'] - $non_calc_holiday_days), 4)*100;
+            }
+
+            // 社員別出勤率データを格納した連想配列に格納する
+            $employeeAttendanceRateArray[] = [
+                'employee_number' => $employee_code,
+                'planned_working_days' => $CalcForShiftArray[$employee_code]['planned_working_days'] ?? 0,
+                'planned_holidays' => $CalcForShiftArray[$employee_code]['planned_holidays'] ?? 0,
+                'actual_working_days' => $actual_working_days,
+                'actual_attendance_rate' => $actual_attendance_rate,
+                'paid_leave_calc_working_days' => $paid_leave_calc_working_days,
+                'paid_leave_calc_attendance_rate' => $paid_leave_calc_attendance_rate
+            ];
+        }
+    
+    return $employeeAttendanceRateArray;
+}
+
+/**
+ * 休暇取得日数を加算する処理
+ * 
+ */ 
+function calcHolidayDaysForAttendanceRate($holidayTypeMasterArray, $attendanceDataForAttendanceRateCal): int{
+    $totalDays = 0;
+    foreach($holidayTypeMasterArray as $hc){
+        // attendanceDataForAttendanceRateCalの該当する休暇取得日数を加算する（HOLIDAY_MASTER_CODE_Dictionaryを利用）
+        $code = HOLIDAY_MASTER_CODE_Dictionary[$hc] ?? null;
+        if($code && isset($attendanceDataForAttendanceRateCal[$code])){
+            $totalDays += $attendanceDataForAttendanceRateCal[$code];
+        }
+    }
+    return $totalDays;
 }

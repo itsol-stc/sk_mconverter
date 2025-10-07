@@ -3,10 +3,12 @@
 require_once __DIR__ . '/config.php';
 
 // PhpSpreadsheet の IOFactory クラスを使用
+use LDAP\Result;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 
 use function PHPSTORM_META\override;
+
 
 function loadSql($filePath)
 {
@@ -321,6 +323,7 @@ function minutesOrHhmmToHourMinuteStr(string $v): string
  *     out: mixed,
  *     excelValues: array,
  *     variedOvertimeValues: array
+ *     attendanceDataForAttendanceRateCal: array
  * }
  */
 function buildXlsToTempByEmployee(
@@ -348,10 +351,12 @@ function buildXlsToTempByEmployee(
     // 勤怠集計CSV、休暇取得CSVの両方に存在する社員コードを抽出
     $employeeCodes = unionEmployeeCodes($csvKintai, $csvKyuka);
 
-    // prosrv_importテーブルに登録するデータを格納する配列
+    // prosrv_import(PROSRV取込データ)テーブルに登録するデータを格納する配列
     $excelValues = [];
-    // varied_overtime_employee テーブルに登録するデータを格納する配列
+    // varied_overtime_employee（変形労働対象者一覧）テーブルに登録するデータを格納する配列
     $variedOvertimeValues = [];
+    // 出勤率計算で使用する、出勤日数・各休暇取得日数を格納する配列
+    $attendanceDataForAttendanceRateCal = [];
 
     foreach ($employeeCodes as $employeeCode) {
         $kintaiRow = $csvKintai[$employeeCode] ?? [];
@@ -409,7 +414,6 @@ function buildXlsToTempByEmployee(
 
             // 前有・後有を同日に取った場合は全休扱いとする
             if ($halfAm >= 1 && $halfPm >= 1 && !empty($halfHolidayByEmp[$employeeCode])) {
-
                 $bothHalfHolidayCount = (int)$halfHolidayByEmp[$employeeCode]['both_half_holiday_count']; // 前有・後有を同日に取得した回数
                 $halfAm = $halfAm - $bothHalfHolidayCount; // 同日に取得した回数分「前有」から減算
                 $halfPm = $halfPm - $bothHalfHolidayCount; // 同日に取得した回数分「後有」から減算
@@ -530,7 +534,7 @@ function buildXlsToTempByEmployee(
         $rowValues[] = pickVal($kyukaRow, ['介護・看護休暇（無給）(全休)【27】'], '-'); // 36. 看休（無給）
         $rowValues[] = pickVal($kyukaRow, ['生理休暇（無給）(全休)【26】'], '-'); // 37. 生休（無給）
         $rowValues[] = pickVal($kyukaRow, ['労災欠勤(全休)【45】'], '-');  // 38. 労災
-        $rowValues[] = pickVal($kyukaRow, ['災害休暇(全休)【46】'], '-');  // 39. 労災
+        $rowValues[] = pickVal($kyukaRow, ['災害休暇(全休)【46】'], '-');  // 39. 災害
         $rowValues[] = '0'; // 40. 育勤
         $rowValues[] = '0'; // 41. 介勤
 
@@ -579,12 +583,12 @@ function buildXlsToTempByEmployee(
             'nursing_care_unpaid'  => $rowValues[35], // 36. 看休（無給）
             'menstruation_leave'   => $rowValues[36], // 37. 生休（無給）
             'workers_compensation' => $rowValues[37], // 38. 労災
-            'disaster_leave'       => $rowValues[38], // 39. 労災
+            'disaster_leave'       => $rowValues[38], // 39. 災害
             'childcare_work'       => $rowValues[39], // 40. 育勤
             'nursing_care_work'    => $rowValues[40], // 41. 介勤
         ];
 
-        // 変形労働割増対象者の場合、
+        // --- 変形労働割増対象者用配列作成
         if($isContractWorkMinutesOver){
             // varied_overtime_employee テーブルに格納するデータを連想配列で格納
             $variedOvertimeValues[] = [
@@ -595,8 +599,49 @@ function buildXlsToTempByEmployee(
                 'overtime_nomal_adjusted' => $rowValues[10], // 調整後残業時間（分）
                 'contractWorkMinutesOvertime' => minutesOrHhmmToHourMinuteStr((string)$contractWorkMinutesOvertime), // 所定時間超過分（分）
             ];   
-        }   
+        }
+
+        // --- 出勤率計算用配列作成
+        // 前有・後有の回数を取得
+        $halfAm = $rowValues[22];   // 午前休
+        $halfPm = $rowValues[23];   // 午後休
+        $paid_holiday_total = $rowValues[8]; // 有休（全休＋午前＋午後）
+        // 前有・後有を同日に取った場合は全休扱いとする
+            if ($halfAm >= 1 && $halfPm >= 1 && !empty($halfHolidayByEmp[$employeeCode])) {
+                $bothHalfHolidayCount = (int)$halfHolidayByEmp[$employeeCode]['both_half_holiday_count']; // 前有・後有を同日に取得した回数
+                $halfAm = $halfAm - $bothHalfHolidayCount; // 同日に取得した回数分「前有」から減算
+                $halfPm = $halfPm - $bothHalfHolidayCount; // 同日に取得した回数分「後有」から減算
+                // 同日に取得した分を有休（全休）に加算
+                $paid_holiday_total = $paid_holiday_total + $bothHalfHolidayCount;
+            }
         
+
+        // 出勤率計算で使用する配列
+        $attendanceDataForAttendanceRateCal[]=[
+            'employee_number'           => $employeeCode, // 社員番号
+            'work_days'                 => $rowValues[7] - ( ($halfAm + $halfPm) * 0.5), // 出勤日数(前有・後有の半日分を差し引く)
+            'paid_holiday_total'        => $paid_holiday_total + ( ($halfAm + $halfPm) * 0.5), // 有休（全休＋午前＋午後）
+            'substitute_holiday_am'     => $rowValues[27],    // 前振
+            'special_holiday_am'        =>  $rowValues[24],    // 前期特別休暇
+            'special_holiday_pm'        =>  $rowValues[25],    // 後期特別休暇
+            'marriage_leave'            =>  $rowValues[29],    // 結婚休暇
+            'bereavement_leave'         =>  $rowValues[28],    // 忌引休暇
+            'maternity_leave_paid'      =>  $rowValues[30],    // 産休（有給）
+            'maternity_leave_unpaid'    => $rowValues[31],    // 産休（無給）
+            'menstruation_leave'        =>  $rowValues[36],    // 生理休暇（無給）
+            'nursing_care_unpaid'       =>  $rowValues[35],    // 介護・看護休暇（無給）
+            'public_holiday'            =>  $rowValues[21],    // 休日
+            'unpaid_leave'              =>  $rowValues[34],    // 無欠無給
+            'sick_leave_150'            =>  $rowValues[17],    // 病欠150
+            'recuperation_80'           =>  pickVal($kyukaRow, ['療養80(全休)【39】'], '-'),    // 療養80
+            'childcare_leave'           =>  $rowValues[32],    // 育児休暇
+            'nursing_care_leave'        =>  $rowValues[33],    // 介護休暇
+            'attendance_stop'           =>  pickVal($kyukaRow, ['出勤停止(全休)【43】'], '-'),    // 出勤停止
+            'official_holiday'          =>  $rowValues[26],    // 公休
+            'workers_compensation'      =>   $rowValues[37],    // 労災欠勤
+            'disaster_leave'            =>  $rowValues[38],    // 災害休暇
+        ];
+
         $rowIndex++;
     }
 
@@ -606,7 +651,8 @@ function buildXlsToTempByEmployee(
     return [
         'out' => $out,
         'excelValues' => $excelValues,
-        'variedOvertimeValues' => $variedOvertimeValues
+        'variedOvertimeValues' => $variedOvertimeValues,
+        'attendanceDataForAttendanceRateCal' => $attendanceDataForAttendanceRateCal
     ];
 }
 
@@ -746,4 +792,180 @@ function getApplicationSettingsToEmployees(array $empResult, array $applicationR
     }
 
     return $employeesWithApplications;
+}
+
+
+/**
+ * 社員情報と適用設定データをもとに、勤務予定（カレンダ）、勤務変更、休暇申請データを結合して
+ * 月単位の「シフト表」データを作成する。
+ *
+ * @param array $employeesWithApplications 社員情報＋設定適用データ（schedule_code 付与済）
+ * @param array $scheResult カレンダ情報（スケジュールマスタ）
+ * @param array $workchngResult 勤務形態変更申請データ
+ * @param array $holidayResult 休暇申請データ
+ * @return array シフト表（社員ごとの日付別スケジュール配列）
+ */
+function getShift(array $employeesWithApplications, array $scheResult, array $workchngResult, array $holidayResult): array
+{
+    // --------------------------------------------------
+    // カレンダ情報の整形：schedule_code × 日付単位の多次元配列に変換
+    // --------------------------------------------------
+    $data = [];
+    foreach ($scheResult as $sche) {
+        $schedule_code = $sche["schedule_code"];
+        $schedule_date = $sche["schedule_date"];
+
+        // 日付単位で必要な勤務スケジュール情報を格納
+        $data[$schedule_code][$schedule_date] = array_intersect_key($sche, array_flip([
+            "work_type_code",
+            "works",
+            "remark",
+            "workstart",
+            "workend",
+            "worktime",
+            "resttime",
+            "reststart1",
+            "restend1",
+            "reststart2",
+            "restend2",
+            "reststart3",
+            "restend3",
+            "reststart4",
+            "restend4",
+            "frontstart",
+            "frontend",
+            "backstart",
+            "backend",
+            "overbefore",
+            "overper",
+            "overrest",
+            "halfrest",
+            "halfreststart",
+            "halfrestend",
+            "directstart",
+            "directend",
+            "excludenightrest",
+            "short1start",
+            "short1end",
+            "short2start",
+            "short2end",
+            "autobefoverwork"
+        ]));
+    }
+
+    // --------------------------------------------------
+    // 勤務形態変更データの整形：personal_id × 日付 の二次元配列に変換
+    // --------------------------------------------------
+    $workchndata = [];
+    foreach ($workchngResult as $item) {
+        $workchndata[$item["personal_id"]][$item["request_date"]] = array_intersect_key($item, array_flip([
+            "work_type_code",
+            "request_reason",
+            "workflow",
+            "workstart",
+            "workend",
+            "worktime",
+            "resttime",
+            "reststart1",
+            "restend1",
+            "reststart2",
+            "restend2",
+            "reststart3",
+            "restend3",
+            "reststart4",
+            "restend4",
+            "frontstart",
+            "frontend",
+            "backstart",
+            "backend",
+            "overbefore",
+            "overper",
+            "overrest",
+            "halfrest",
+            "halfreststart",
+            "halfrestend",
+            "directstart",
+            "directend",
+            "excludenightrest",
+            "short1start",
+            "short1end",
+            "short2start",
+            "short2end",
+            "autobefoverwork"
+        ]));
+    }
+
+    // --------------------------------------------------
+    // 休暇申請データの整形：personal_id × 日付 の二次元配列に変換
+    // --------------------------------------------------
+    $holidaydata = [];
+    foreach ($holidayResult as $holiday) {
+        $holidaydata[$holiday["personal_id"]][$holiday["request_start_date"]] = [
+            "work_type_code" => "request_holiday",  // 固定値で「休暇」を示す
+            "request_reason" => $holiday["request_reason"],
+            "workflow"       => $holiday["workflow"],
+            "holiday_range"       => $holiday["holiday_range"],
+            "holiday_type1_name"       => $holiday["holiday_type1_name"],
+            "holiday_type2_name"       => $holiday["holiday_type2_name"],
+            "holiday_abbr" => $holiday["holiday_abbr"],
+        ];
+    }
+
+    // --------------------------------------------------
+    // 各社員に対して日付単位のスケジュールを統合していく
+    // --------------------------------------------------
+    $shift = [];
+
+    foreach ($employeesWithApplications as $employee) {
+        // スケジュールコード未設定の場合はスキップ（安全対策）
+        $schedule_code = $employee["schedule_code"] ?? null;
+        $personal_id   = $employee["personal_id"];
+
+        if (empty($schedule_code) || !isset($data[$schedule_code])) {
+            continue;
+        }
+
+        // 該当社員の基本スケジュール（日付単位）を取得
+        $originalSchedule = $data[$schedule_code];
+        $mergedSchedule = [];
+
+        // --------------------------------------------------
+        // 5. 日付ごとに優先順位でスケジュールを上書き統合
+        // --------------------------------------------------
+        foreach ($originalSchedule as $date => $schedule) {
+            if (isset($workchndata[$personal_id][$date])) {
+                // 勤務形態変更がある場合は最優先で反映
+                $mergedSchedule[$date] = $workchndata[$personal_id][$date];
+            } elseif (isset($holidaydata[$personal_id][$date])) {
+                // 次に休暇申請があればそれを反映
+                if ($holidaydata[$personal_id][$date]['holiday_range'] === 1) {
+                    // 全休の場合、休憩データを使用
+                    $mergedSchedule[$date] = $holidaydata[$personal_id][$date];
+                } else if ($holidaydata[$personal_id][$date]['holiday_range'] === 2) {
+                    // 午前休の場合、休憩終了時刻を勤務開始時間としたスケジュールを使用
+                    $schedule['workstart'] = $schedule['backstart'];
+                    $schedule['work_type_code'] = "half_rest_front";
+                    $mergedSchedule[$date] = $schedule;
+                } else if ($holidaydata[$personal_id][$date]['holiday_range'] === 3) {
+                    // 午後休の場合、休憩開始時刻を勤務終了時間としたスケジュールを使用
+                    $schedule['workend'] = $schedule['reststart1'];
+                    $schedule['work_type_code'] = "half_rest_end";
+                    $mergedSchedule[$date] = $schedule;
+                }
+            } else {
+                // 変更・休暇がなければ元スケジュールをそのまま使用
+                $mergedSchedule[$date] = $schedule;
+            }
+        }
+
+        // スケジュールデータを上書きして、shift結果に追加
+        $employee["schedule_code"] = $mergedSchedule;
+        $shift[] = $employee;
+    }
+
+    // メモリ節約のため不要なデータを解放
+    unset($employeesWithApplications);
+
+    // 最終的なシフトデータを返却
+    return $shift;
 }
