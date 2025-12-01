@@ -420,11 +420,11 @@ function buildXlsToTempByEmployee(
                 $holiday755cnt = $holiday755cnt + $bothHalfHolidayCount; // 同日に取得した回数分「7時間55分」減算対象休暇日数に加算
             }
 
-            // 3時間55分減算対象の休暇日数を取得
-            $holiday355cnt = $halfAm + $halfPm;
+            // 4時間00分減算対象の休暇日数を取得
+            $holiday400cnt = $halfAm + $halfPm;
 
             // 休暇取得日数を考慮したフレックス基準時間を算出
-            $flexStdAdj    = $flexStandardMinutes - ($holiday755cnt * 475) - ($holiday355cnt * 235);
+            $flexStdAdj    = $flexStandardMinutes - ($holiday755cnt * 475) - ($holiday400cnt * 240);
 
             // フレックス勤務者の「勤務時間」「残業時間」「減給時間」を算出
             $workMinutes   = (int)($kintaiRow['勤務時間'] ?? 0);
