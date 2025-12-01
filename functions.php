@@ -244,10 +244,10 @@ function normalizePayday(string $payday): string
     $ts = strtotime($payday);
     return $ts ? date('Y/m/d', $ts) : $payday;
 }
-/** 両CSVの社員コード和集合（昇順） */
+/** 両CSVの社員コード積集合（昇順） */
 function unionEmployeeCodes(array $csv1ByEmp, array $csv2ByEmp): array
 {
-    $codes = array_unique(array_merge(array_keys($csv1ByEmp), array_keys($csv2ByEmp)));
+    $codes = array_intersect(array_keys($csv1ByEmp), array_keys($csv2ByEmp));
     sort($codes, SORT_NATURAL);
     return $codes;
 }
